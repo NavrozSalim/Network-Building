@@ -1,0 +1,12 @@
+{
+  "masterIp": "192.168.1.26",
+  "port": 8787,
+  "token": "listing-network",
+  "heartbeatSeconds": 5,
+  "offlineSeconds": 20,
+  "workers": [
+    "listing-worker-1",
+    "listing-worker-2",
+    "listing-worker-3"
+  ]
+}

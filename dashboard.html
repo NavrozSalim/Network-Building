@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Listing laptops</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f1ea;
+      --ink: #1d241c;
+      --muted: #5d675c;
+      --card: #fffdf8;
+      --line: #ddd6c8;
+      --free: #1f7a45;
+      --busy: #9a6412;
+      --pending: #1d4e89;
+      --offline: #6d675f;
+      --failed: #9d2c2c;
+      --done: #2a6b45;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 16px/1.45 "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    main { max-width: 1080px; margin: 0 auto; padding: 28px 20px 48px; }
+    h1 { font-size: 32px; line-height: 1.1; margin: 0 0 8px; }
+    p { margin: 0; color: var(--muted); }
+    .banner {
+      display: none;
+      margin-top: 16px;
+      padding: 12px 14px;
+      background: #fff4e8;
+      border: 1px solid #e7c49a;
+      border-radius: 10px;
+    }
+    .counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 22px 0; }
+    .count { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+    .count b { display: block; font-size: 28px; line-height: 1; }
+    .count span { color: var(--muted); font-size: 14px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
+    button {
+      font: inherit;
+      border: 1px solid #243024;
+      background: #243024;
+      color: white;
+      border-radius: 999px;
+      padding: 8px 14px;
+      cursor: pointer;
+    }
+    button.secondary { background: transparent; color: var(--ink); }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    section { margin-top: 8px; }
+    h2 { font-size: 18px; margin: 18px 0 8px; }
+    table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { font-size: 13px; color: var(--muted); font-weight: 600; }
+    tr:last-child td { border-bottom: 0; }
+    .pill { display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 13px; background: #ece7dc; }
+    .free { color: var(--free); background: #e5f6ec; }
+    .busy { color: var(--busy); background: #fff1d6; }
+    .pending, .assigned { color: var(--pending); background: #e7f0fb; }
+    .running { color: var(--busy); background: #fff1d6; }
+    .offline { color: var(--offline); }
+    .done { color: var(--done); background: #e5f6ec; }
+    .failed { color: var(--failed); background: #fdecec; }
+    .empty { padding: 14px; color: var(--muted); }
+    .error { color: var(--failed); min-height: 1.2em; margin-top: 8px; }
+    @media (max-width: 800px) { .counts { grid-template-columns: repeat(2, 1fr); } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Listing laptops</h1>
+    <p>The master gives the next task to a laptop that is free. If every worker is busy, the task stays pending.</p>
+    <div id="banner" class="banner"></div>
+    <div class="counts">
+      <div class="count"><b id="free">0</b><span>Free</span></div>
+      <div class="count"><b id="busy">0</b><span>Busy</span></div>
+      <div class="count"><b id="offline">0</b><span>Offline</span></div>
+      <div class="count"><b id="pending">0</b><span>Pending</span></div>
+    </div>
+    <div class="actions">
+      <button id="add-one" type="button">Add a 20 second test task</button>
+      <button id="add-four" type="button">Add 4 test tasks</button>
+      <button id="clear" class="secondary" type="button">Clear finished</button>
+    </div>
+    <div id="error" class="error"></div>
+    <section>
+      <h2>Laptops</h2>
+      <div id="workers"></div>
+    </section>
+    <section>
+      <h2>Tasks</h2>
+      <div id="tasks"></div>
+    </section>
+  </main>
+  <script>
+    var TOKEN = "__TOKEN__";
+
+    function esc(value) {
+      return String(value == null ? "" : value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    function pill(status) {
+      return '<span class="pill ' + esc(status) + '">' + esc(status) + "</span>";
+    }
+
+    function draw(data) {
+      document.getElementById("free").textContent = data.counts.free;
+      document.getElementById("busy").textContent = data.counts.busy;
+      document.getElementById("offline").textContent = data.counts.offline;
+      document.getElementById("pending").textContent = data.counts.pending;
+      var banner = document.getElementById("banner");
+      if (!data.lanReady) {
+        banner.style.display = "block";
+        banner.textContent = "The other laptops cannot connect yet. Right-click Setup-Master.bat, choose Run as administrator, then start Start-Master.bat again.";
+      } else {
+        banner.style.display = "none";
+      }
+
+      var workers = data.workers || [];
+      if (!workers.length) {
+        document.getElementById("workers").innerHTML = '<div class="empty">No worker laptops yet.</div>';
+      } else {
+        var body = "";
+        for (var i = 0; i < workers.length; i++) {
+          var worker = workers[i];
+          body += "<tr><td>" + esc(worker.name) + "</td><td>" + esc(worker.ip || "-") + "</td><td>" + pill(worker.state) + "</td><td>" + esc(worker.taskTitle || "") + "</td></tr>";
+        }
+        document.getElementById("workers").innerHTML = "<table><thead><tr><th>Laptop</th><th>Address</th><th>Status</th><th>Current task</th></tr></thead><tbody>" + body + "</tbody></table>";
+      }
+
+      var tasks = data.tasks || [];
+      var ordered = tasks.slice().sort(function (a, b) {
+        var rank = { pending: 0, assigned: 1, running: 2, failed: 3, done: 4 };
+        var ar = rank[a.status]; if (ar == null) ar = 9;
+        var br = rank[b.status]; if (br == null) br = 9;
+        if (ar !== br) return ar - br;
+        return String(a.createdAt).localeCompare(String(b.createdAt));
+      });
+      if (!ordered.length) {
+        document.getElementById("tasks").innerHTML = '<div class="empty">No tasks yet. Add a test task to see a free laptop pick it up.</div>';
+      } else {
+        var rows = "";
+        for (var j = 0; j < ordered.length; j++) {
+          var task = ordered[j];
+          rows += "<tr><td>" + esc(task.title) + "</td><td>" + pill(task.status) + "</td><td>" + esc(task.assignedTo || "") + "</td><td>" + esc(task.message || "") + "</td></tr>";
+        }
+        document.getElementById("tasks").innerHTML = "<table><thead><tr><th>Task</th><th>Status</th><th>Laptop</th><th>Note</th></tr></thead><tbody>" + rows + "</tbody></table>";
+      }
+      document.getElementById("error").textContent = "";
+    }
+
+    function load() {
+      return fetch("/api/status", { headers: { "X-Network-Token": TOKEN }, cache: "no-store" })
+        .then(function (response) { return response.json(); })
+        .then(draw)
+        .catch(function () {
+          document.getElementById("error").textContent = "The master window is not answering.";
+        });
+    }
+
+    function post(path, body) {
+      document.getElementById("add-one").disabled = true;
+      document.getElementById("add-four").disabled = true;
+      return fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Network-Token": TOKEN },
+        body: JSON.stringify(body || {})
+      }).then(function () { return load(); })
+        .catch(function () {
+          document.getElementById("error").textContent = "Could not update the task list.";
+        })
+        .then(function () {
+          document.getElementById("add-one").disabled = false;
+          document.getElementById("add-four").disabled = false;
+        });
+    }
+
+    document.getElementById("add-one").onclick = function () {
+      post("/api/tasks", { title: "Test task", kind: "echo", seconds: 20 });
+    };
+    document.getElementById("add-four").onclick = function () {
+      post("/api/tasks", { title: "Test task", kind: "echo", seconds: 20, count: 4 });
+    };
+    document.getElementById("clear").onclick = function () {
+      post("/api/tasks/clear-finished", {});
+    };
+    load();
+    setInterval(load, 2000);
+  </script>
+</body>
+</html>
