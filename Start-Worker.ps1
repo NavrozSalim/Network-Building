@@ -13,6 +13,14 @@ $script:Port = [int]$config["port"]
 $script:Token = [string]$config["token"]
 $script:HeartbeatSeconds = [int]$config["heartbeatSeconds"]
 if ($script:HeartbeatSeconds -lt 2) { $script:HeartbeatSeconds = 2 }
+$script:Bots = @{}
+if ($config.ContainsKey("bots") -and $config["bots"]) {
+    foreach ($botKey in @($config["bots"].Keys)) {
+        $botRow = $config["bots"][$botKey]
+        $botScript = [string]$botRow["script"]
+        if ($botScript) { $script:Bots[[string]$botKey] = $botScript }
+    }
+}
 $script:WorkerName = $env:COMPUTERNAME
 
 if ($script:WorkerName -match "master") {
@@ -85,6 +93,38 @@ $jobScript = {
     } catch {
         return @{ ok = $false; message = $_.Exception.Message }
     }
+}
+
+function Get-BotCommand {
+    param($Task)
+    $botId = [string]$Task.bot
+    if (-not $script:Bots.ContainsKey($botId)) {
+        throw "This laptop does not know the bot '$botId'. Copy the new config.json here and start the worker again."
+    }
+    $scriptPath = [string]$script:Bots[$botId]
+    if (-not (Test-Path -LiteralPath $scriptPath)) {
+        throw "The bot file was not found: $scriptPath"
+    }
+    $jobDir = Join-Path $root "jobs"
+    New-Item -ItemType Directory -Force -Path $jobDir | Out-Null
+    $ext = [System.IO.Path]::GetExtension([string]$Task.fileName).ToLowerInvariant()
+    if ($ext -ne ".xlsx" -and $ext -ne ".xls") { $ext = ".xlsx" }
+    $localFile = Join-Path $jobDir ([string]$Task.id + $ext)
+    $fileUri = "http://$($script:MasterIp):$($script:Port)/api/files/$([string]$Task.id)"
+    $progress = $ProgressPreference
+    $ProgressPreference = "SilentlyContinue"
+    try {
+        Invoke-WebRequest -Uri $fileUri -Headers @{ "X-Network-Token" = $script:Token } -OutFile $localFile -TimeoutSec 120 -UseBasicParsing
+    } finally {
+        $ProgressPreference = $progress
+    }
+    if (-not (Test-Path -LiteralPath $localFile) -or (Get-Item -LiteralPath $localFile).Length -lt 1) {
+        throw "The Excel file did not download."
+    }
+    $command = 'python "' + $scriptPath.Replace('"', "") + '" "' + $localFile.Replace('"', "") + '"'
+    $store = ([string]$Task.store).Trim()
+    if ($store) { $command += ' --store "' + $store.Replace('"', "") + '"' }
+    return $command
 }
 
 function Start-WorkerTask {
@@ -202,7 +242,25 @@ while ($true) {
             }
             if ($response.task -and $response.task.id) {
                 Write-WorkerLog "Got task $($response.task.id): $($response.task.title)"
-                $active = Start-WorkerTask -Task $response.task
+                $ready = $true
+                if ([string]$response.task.kind -eq "bot") {
+                    try {
+                        $response.task.command = Get-BotCommand -Task $response.task
+                        $response.task.kind = "command"
+                        Write-WorkerLog "Excel saved. Starting the bot."
+                    } catch {
+                        $ready = $false
+                        $reason = $_.Exception.Message
+                        Write-WorkerLog $reason
+                        Invoke-Master -Method Post -Path "/api/task-result" -Body @{
+                            name    = $script:WorkerName
+                            taskId  = [string]$response.task.id
+                            status  = "failed"
+                            message = $reason
+                        } | Out-Null
+                    }
+                }
+                if ($ready) { $active = Start-WorkerTask -Task $response.task }
             }
         }
     } catch {

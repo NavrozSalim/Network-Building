@@ -18,13 +18,27 @@ $script:OfflineSeconds = [int]$config["offlineSeconds"]
 if ($script:OfflineSeconds -lt 10) { $script:OfflineSeconds = 10 }
 $script:KnownWorkers = @()
 foreach ($name in $config["workers"]) { $script:KnownWorkers += [string]$name }
+$script:Bots = @{}
+if ($config.ContainsKey("bots") -and $config["bots"]) {
+    foreach ($botKey in @($config["bots"].Keys)) {
+        $botRow = $config["bots"][$botKey]
+        $botLabel = [string]$botRow["label"]
+        $botScript = [string]$botRow["script"]
+        if (-not $botLabel) { $botLabel = [string]$botKey }
+        if ($botScript) {
+            $script:Bots[[string]$botKey] = @{ label = $botLabel; script = $botScript }
+        }
+    }
+}
 
 $script:Workers = @{}
 $script:Tasks = New-Object System.Collections.ArrayList
 $script:LanReady = $false
 $script:DataDir = Join-Path $root "data"
+$script:UploadDir = Join-Path $script:DataDir "uploads"
 $script:StatePath = Join-Path $script:DataDir "state.json"
 New-Item -ItemType Directory -Force -Path $script:DataDir | Out-Null
+New-Item -ItemType Directory -Force -Path $script:UploadDir | Out-Null
 
 function Write-Log {
     param([string]$Message)
@@ -258,6 +272,9 @@ function Copy-Task {
         kind       = [string]$Task.kind
         seconds    = $Task.seconds
         command    = [string]$Task.command
+        bot        = [string]$Task.bot
+        store      = [string]$Task.store
+        fileName   = [string]$Task.fileName
         status     = [string]$Task.status
         assignedTo = [string]$Task.assignedTo
         message    = [string]$Task.message
@@ -329,6 +346,7 @@ function Get-StatusObject {
         lanReady = [bool]$script:LanReady
         masterIp = $script:MasterIp
         port     = $script:Port
+        bots     = (Get-BotRows)
         counts   = @{
             free    = $free
             busy    = $busy
@@ -340,15 +358,34 @@ function Get-StatusObject {
     }
 }
 
+function Get-BotRows {
+    $order = @("etsy-create", "reverb-create", "reverb-stock", "reverb-sku")
+    $rows = New-Object System.Collections.ArrayList
+    $seen = @{}
+    foreach ($botKey in $order) {
+        if (-not $script:Bots.ContainsKey($botKey)) { continue }
+        $seen[$botKey] = $true
+        [void]$rows.Add(@{ id = $botKey; label = [string]$script:Bots[$botKey].label })
+    }
+    foreach ($botKey in @($script:Bots.Keys)) {
+        if ($seen.ContainsKey($botKey)) { continue }
+        [void]$rows.Add(@{ id = [string]$botKey; label = [string]$script:Bots[$botKey].label })
+    }
+    return $rows
+}
+
 function New-PendingTask {
     param(
         [string]$Title,
         [string]$Kind,
         $Seconds,
-        [string]$Command
+        [string]$Command,
+        [string]$Bot = "",
+        [string]$Store = "",
+        [string]$FileName = ""
     )
-    if ($Kind -ne "echo" -and $Kind -ne "command") {
-        throw "Task kind must be echo or command."
+    if ($Kind -ne "echo" -and $Kind -ne "command" -and $Kind -ne "bot") {
+        throw "Task kind must be echo, command, or bot."
     }
     $seconds = 20
     if ($null -ne $Seconds -and "$Seconds" -ne "") { $seconds = [int]$Seconds }
@@ -361,6 +398,9 @@ function New-PendingTask {
         kind       = $Kind
         seconds    = $seconds
         command    = $Command
+        bot        = $Bot
+        store      = $Store
+        fileName   = $FileName
         status     = "pending"
         assignedTo = ""
         message    = "Waiting for a free laptop."
@@ -429,6 +469,45 @@ function Send-Response {
     $Response.ContentLength64 = $bytes.Length
     $Response.OutputStream.Write($bytes, 0, $bytes.Length)
     $Response.OutputStream.Close()
+}
+
+function Write-Result {
+    param($Response, $Result)
+    if ($Result.FilePath) {
+        $stream = [System.IO.File]::OpenRead([string]$Result.FilePath)
+        try {
+            $Response.StatusCode = [int]$Result.Status
+            $Response.ContentType = [string]$Result.Type
+            $Response.Headers["Cache-Control"] = "no-store"
+            if ($Result.FileName) {
+                $Response.Headers["Content-Disposition"] = 'attachment; filename="' + [string]$Result.FileName + '"'
+            }
+            $Response.ContentLength64 = $stream.Length
+            $stream.CopyTo($Response.OutputStream)
+        } finally {
+            $stream.Close()
+            $Response.OutputStream.Close()
+        }
+        return
+    }
+    Send-Response -Response $Response -Status $Result.Status -ContentType $Result.Type -Text $Result.Body
+}
+
+function Remove-TaskById {
+    param([string]$TaskId)
+    $kept = New-Object System.Collections.ArrayList
+    foreach ($task in @($script:Tasks)) {
+        if ([string]$task.id -eq $TaskId) { continue }
+        [void]$kept.Add($task)
+    }
+    $script:Tasks = $kept
+}
+
+function Get-UploadPath {
+    param($Task)
+    $ext = [System.IO.Path]::GetExtension([string]$Task.fileName).ToLowerInvariant()
+    if ($ext -ne ".xlsx" -and $ext -ne ".xls") { $ext = ".xlsx" }
+    return Join-Path $script:UploadDir ([string]$Task.id + $ext)
 }
 
 function Get-PageHtml {
@@ -512,6 +591,68 @@ function Handle-Request {
         Save-State
         Write-Log "Task $($task.id) $status on $name"
         return @{ Status = 200; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $true }) }
+    }
+
+    if ($method -eq "GET" -and $path.StartsWith("/api/files/")) {
+        $fileId = $path.Substring("/api/files/".Length)
+        if ($fileId -notmatch "^[a-f0-9]{8}$") {
+            return @{ Status = 404; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $false; message = "File was not found." }) }
+        }
+        $task = Get-TaskById $fileId
+        if (-not $task) {
+            return @{ Status = 404; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $false; message = "File was not found." }) }
+        }
+        $uploadPath = Get-UploadPath $task
+        if (-not (Test-Path -LiteralPath $uploadPath)) {
+            return @{ Status = 404; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $false; message = "File was not found." }) }
+        }
+        $downloadName = [System.IO.Path]::GetFileName([string]$task.fileName)
+        if (-not $downloadName) { $downloadName = [System.IO.Path]::GetFileName($uploadPath) }
+        return @{ Status = 200; Type = "application/octet-stream"; FilePath = $uploadPath; FileName = $downloadName }
+    }
+
+    if ($method -eq "POST" -and $path -eq "/api/tasks/upload") {
+        $botId = ([string]$Request.Headers["X-Bot"]).Trim()
+        $store = ([string]$Request.Headers["X-Store"]).Trim()
+        $rawName = [Uri]::UnescapeDataString(([string]$Request.Headers["X-File-Name"]))
+        $fileName = [System.IO.Path]::GetFileName($rawName)
+        if (-not $script:Bots.ContainsKey($botId)) {
+            return @{ Status = 400; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $false; message = "Choose an Etsy or Reverb bot." }) }
+        }
+        $ext = [System.IO.Path]::GetExtension($fileName).ToLowerInvariant()
+        if ($ext -ne ".xlsx" -and $ext -ne ".xls") {
+            return @{ Status = 400; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $false; message = "Choose an Excel file (.xlsx)." }) }
+        }
+        if ($store -match '["\r\n]' -or $store.Length -gt 40) {
+            return @{ Status = 400; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $false; message = "Store code is not valid." }) }
+        }
+        $maxBytes = 80MB
+        if ($Request.ContentLength64 -gt $maxBytes) {
+            return @{ Status = 413; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $false; message = "That Excel file is larger than 80 MB." }) }
+        }
+        $label = [string]$script:Bots[$botId].label
+        $title = $label
+        if ($store) { $title = "$label $store" }
+        $task = New-PendingTask -Title $title -Kind "bot" -Seconds 20 -Command "" -Bot $botId -Store $store -FileName $fileName
+        $uploadPath = Get-UploadPath $task
+        $fileStream = [System.IO.File]::Create($uploadPath)
+        try {
+            $Request.InputStream.CopyTo($fileStream)
+        } finally {
+            $fileStream.Close()
+        }
+        $length = (Get-Item -LiteralPath $uploadPath).Length
+        if ($length -lt 1 -or $length -gt $maxBytes) {
+            Remove-Item -LiteralPath $uploadPath -Force -ErrorAction SilentlyContinue
+            Remove-TaskById $task.id
+            $reason = "The Excel file was empty."
+            if ($length -gt $maxBytes) { $reason = "That Excel file is larger than 80 MB." }
+            return @{ Status = 400; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $false; message = $reason }) }
+        }
+        $task.message = "Waiting for a free laptop. File: $fileName"
+        Save-State
+        Write-Log "Task $($task.id) is pending ($title)"
+        return @{ Status = 200; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $true; task = (Copy-Task $task) }) }
     }
 
     if ($method -eq "POST" -and $path -eq "/api/tasks") {
@@ -615,6 +756,9 @@ if ($env:NETWORK_SELFTEST -eq "1") {
     $script:Port = $listenPort
     $script:Workers = @{}
     $script:Tasks = New-Object System.Collections.ArrayList
+    $script:UploadDir = Join-Path $env:TEMP "listing-network-uploads"
+    if (Test-Path $script:UploadDir) { Remove-Item $script:UploadDir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $script:UploadDir | Out-Null
     $client = {
         param($Port, $Token)
         $ErrorActionPreference = "Stop"
@@ -633,7 +777,7 @@ if ($env:NETWORK_SELFTEST -eq "1") {
             if ($snippet.Length -gt 160) { $snippet = $snippet.Substring(0, 160) }
             throw "The status page did not load. Body: $snippet"
         }
-        if ($pageText -notmatch [regex]::Escape($Token)) { throw "The status page is missing its token." }
+        if ($pageText -notmatch "Excel file") { throw "The status page has no Excel upload." }
         function Send-Json($Path, $Body) {
             return Invoke-RestMethod -Method Post -Uri "$base$Path" -Headers $headers -ContentType "application/json; charset=utf-8" -Body ($Body | ConvertTo-Json -Compress) -TimeoutSec 10
         }
@@ -657,6 +801,33 @@ if ($env:NETWORK_SELFTEST -eq "1") {
         if (-not $follow.task.id -or $ids -contains [string]$follow.task.id) { throw "The freed laptop did not take the waiting task." }
         $status = Invoke-RestMethod -Method Get -Uri "$base/api/status" -Headers $headers -TimeoutSec 10
         if ([int]$status.counts.pending -ne 0) { throw "A task was still pending after a laptop became free." }
+        $payload = [System.Text.Encoding]::UTF8.GetBytes("excel-test")
+        $req = [System.Net.HttpWebRequest]::Create("$base/api/tasks/upload")
+        $req.Method = "POST"
+        $req.ContentType = "application/octet-stream"
+        $req.Headers.Add("X-Network-Token", $Token)
+        $req.Headers.Add("X-Bot", "etsy-create")
+        $req.Headers.Add("X-Store", "GG")
+        $req.Headers.Add("X-File-Name", [Uri]::EscapeDataString("create.xlsx"))
+        $req.ContentLength = $payload.Length
+        $outStream = $req.GetRequestStream()
+        $outStream.Write($payload, 0, $payload.Length)
+        $outStream.Close()
+        $answer = $req.GetResponse()
+        $reader = New-Object System.IO.StreamReader($answer.GetResponseStream())
+        $uploaded = $reader.ReadToEnd()
+        $reader.Close()
+        $answer.Close()
+        if ($uploaded -notmatch '"kind":"bot"' -or $uploaded -notmatch '"status":"pending"') {
+            throw "Upload did not create a pending bot task. $uploaded"
+        }
+        $idMatch = [regex]::Match($uploaded, '"id":"([a-f0-9]{8})"')
+        if (-not $idMatch.Success) { throw "Upload did not return a task id." }
+        $fileClient = New-Object System.Net.WebClient
+        $fileClient.Headers.Add("X-Network-Token", $Token)
+        $got = $fileClient.DownloadData("$base/api/files/$($idMatch.Groups[1].Value)")
+        $gotText = [System.Text.Encoding]::UTF8.GetString($got)
+        if ($gotText -ne "excel-test") { throw "Downloaded file did not match the upload." }
     }
     $runspace = [runspacefactory]::CreateRunspace()
     $runspace.Open()
@@ -672,7 +843,7 @@ if ($env:NETWORK_SELFTEST -eq "1") {
         $pending = $probe.BeginGetContext($null, $null)
         try {
             $result = Handle-Request $context.Request
-            Send-Response -Response $context.Response -Status $result.Status -ContentType $result.Type -Text $result.Body
+            Write-Result -Response $context.Response -Result $result
         } catch {
             try {
                 Send-Response -Response $context.Response -Status 500 -ContentType "application/json; charset=utf-8" -Text (ConvertTo-ApiJson @{ ok = $false; message = $_.Exception.Message })
@@ -688,6 +859,7 @@ if ($env:NETWORK_SELFTEST -eq "1") {
     $shell.Dispose()
     $runspace.Close()
     if ($clientErrors.Count -gt 0) { throw ($clientErrors -join " ") }
+    if (Test-Path (Join-Path $env:TEMP "listing-network-uploads")) { Remove-Item (Join-Path $env:TEMP "listing-network-uploads") -Recurse -Force }
     if (Test-Path $script:StatePath) { Remove-Item $script:StatePath -Force }
     Write-Output "TEST_OK"
     exit 0
@@ -742,7 +914,7 @@ try {
         if (-not $context) { continue }
         try {
             $result = Handle-Request $context.Request
-            Send-Response -Response $context.Response -Status $result.Status -ContentType $result.Type -Text $result.Body
+            Write-Result -Response $context.Response -Result $result
         } catch {
             Write-Log $_.Exception.Message
             try {

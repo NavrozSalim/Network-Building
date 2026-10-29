@@ -69,7 +69,31 @@
     .failed { color: var(--failed); background: #fdecec; }
     .empty { padding: 14px; color: var(--muted); }
     .error { color: var(--failed); min-height: 1.2em; margin-top: 8px; }
-    @media (max-width: 800px) { .counts { grid-template-columns: repeat(2, 1fr); } }
+    .hint { margin: 8px 0 16px; font-size: 14px; }
+    .job {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr 1.3fr auto;
+      gap: 10px;
+      align-items: end;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+      margin-top: 18px;
+    }
+    .job label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+    .job input, .job select {
+      font: inherit;
+      color: var(--ink);
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px;
+    }
+    @media (max-width: 800px) {
+      .counts { grid-template-columns: repeat(2, 1fr); }
+      .job { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -83,6 +107,19 @@
       <div class="count"><b id="offline">0</b><span>Offline</span></div>
       <div class="count"><b id="pending">0</b><span>Pending</span></div>
     </div>
+    <form id="job" class="job">
+      <label>Bot
+        <select id="bot"></select>
+      </label>
+      <label>Store code
+        <input id="store" type="text" maxlength="40" placeholder="GG">
+      </label>
+      <label>Excel file
+        <input id="excel" type="file" accept=".xlsx,.xls">
+      </label>
+      <button id="send" type="submit">Send to a free laptop</button>
+    </form>
+    <p class="hint">Leave the store blank to run every store in the file on one laptop. Type a store code, such as GG, to run only that store. If every laptop is busy, the file stays pending.</p>
     <div class="actions">
       <button id="add-one" type="button">Add a 20 second test task</button>
       <button id="add-four" type="button">Add 4 test tasks</button>
@@ -112,6 +149,8 @@
       return '<span class="pill ' + esc(status) + '">' + esc(status) + "</span>";
     }
 
+    var botsLoaded = false;
+
     function draw(data) {
       document.getElementById("free").textContent = data.counts.free;
       document.getElementById("busy").textContent = data.counts.busy;
@@ -123,6 +162,18 @@
         banner.textContent = "The other laptops cannot connect yet. Right-click Setup-Master.bat, choose Run as administrator, then start Start-Master.bat again.";
       } else {
         banner.style.display = "none";
+      }
+      if (!botsLoaded) {
+        var select = document.getElementById("bot");
+        var bots = data.bots || [];
+        select.innerHTML = "";
+        for (var b = 0; b < bots.length; b++) {
+          var option = document.createElement("option");
+          option.value = bots[b].id;
+          option.textContent = bots[b].label;
+          select.appendChild(option);
+        }
+        if (bots.length) { botsLoaded = true; }
       }
 
       var workers = data.workers || [];
@@ -192,6 +243,39 @@
     };
     document.getElementById("clear").onclick = function () {
       post("/api/tasks/clear-finished", {});
+    };
+    document.getElementById("job").onsubmit = function (event) {
+      event.preventDefault();
+      var fileInput = document.getElementById("excel");
+      var file = fileInput.files[0];
+      var button = document.getElementById("send");
+      if (!file) {
+        document.getElementById("error").textContent = "Choose an Excel file.";
+        return;
+      }
+      button.disabled = true;
+      fetch("/api/tasks/upload", {
+        method: "POST",
+        headers: {
+          "X-Network-Token": TOKEN,
+          "X-Bot": document.getElementById("bot").value,
+          "X-Store": document.getElementById("store").value.trim(),
+          "X-File-Name": encodeURIComponent(file.name),
+          "Content-Type": "application/octet-stream"
+        },
+        body: file
+      }).then(function (response) {
+        return response.json().then(function (data) {
+          if (!response.ok) { throw new Error(data.message || "Upload failed."); }
+        });
+      }).then(function () {
+        fileInput.value = "";
+        return load();
+      }).catch(function (err) {
+        document.getElementById("error").textContent = err.message || "Upload failed.";
+      }).then(function () {
+        button.disabled = false;
+      });
     };
     load();
     setInterval(load, 2000);

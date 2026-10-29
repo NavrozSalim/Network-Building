@@ -8,5 +8,23 @@
     "listing-worker-1",
     "listing-worker-2",
     "listing-worker-3"
-  ]
+  ],
+  "bots": {
+    "etsy-create": {
+      "label": "Etsy - create listings",
+      "script": "G:\\All Tools Created\\Selimum Etsy Listing Automation\\create_listing.py"
+    },
+    "reverb-create": {
+      "label": "Reverb - create listings",
+      "script": "G:\\All Tools Created\\Selimum Reverb Listing Automation\\create_listing\\create_listing.py"
+    },
+    "reverb-stock": {
+      "label": "Reverb - price and stock",
+      "script": "G:\\All Tools Created\\Selimum Reverb Listing Automation\\price_stock\\update_price_stock.py"
+    },
+    "reverb-sku": {
+      "label": "Reverb - change SKU",
+      "script": "G:\\All Tools Created\\Selimum Reverb Listing Automation\\sku_replace\\sku_replace.py"
+    }
+  }
 }
