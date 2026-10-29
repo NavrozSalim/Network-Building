@@ -95,7 +95,63 @@ $jobScript = {
     }
 }
 
-function Get-BotCommand {
+$botScript = {
+    param($PythonExe, $ScriptPath, $ExcelPath, $Store)
+    try {
+        $argList = @($ScriptPath, $ExcelPath)
+        if ($Store) { $argList += @("--store", $Store) }
+        $output = & $PythonExe @argList 2>&1 | Out-String
+        $output = $output.Trim()
+        if ($output.Length -gt 4000) { $output = $output.Substring(0, 4000) }
+        if (-not $output) { $output = "Bot finished." }
+        if ($LASTEXITCODE -ne 0) {
+            return @{ ok = $false; message = $output }
+        }
+        return @{ ok = $true; message = $output }
+    } catch {
+        return @{ ok = $false; message = $_.Exception.Message }
+    }
+}
+
+function Get-PythonExe {
+    $candidates = @(
+        "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
+        "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+        "C:\Program Files\Python312\python.exe",
+        "C:\Program Files\Python313\python.exe"
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate) { return $candidate }
+    }
+    $found = Get-Command python -ErrorAction SilentlyContinue
+    if ($found -and $found.Source -and $found.Source -notlike "*WindowsApps*") {
+        return $found.Source
+    }
+    throw "Python 3.12 was not found on this laptop."
+}
+
+function Repair-ChromeFolder {
+    param([string]$ScriptPath)
+    $chrome = Join-Path $env:LOCALAPPDATA "Google\Chrome\User Data"
+    if (-not (Test-Path -LiteralPath $chrome)) { return }
+    $dirs = @(
+        (Split-Path -Parent $ScriptPath),
+        (Split-Path -Parent (Split-Path -Parent $ScriptPath))
+    )
+    foreach ($dir in $dirs) {
+        $stores = Join-Path $dir "stores.json"
+        if (-not (Test-Path -LiteralPath $stores)) { continue }
+        $json = Get-Content -Raw -LiteralPath $stores | ConvertFrom-Json
+        $current = [string]$json.chrome_user_data_dir
+        if ($current -and (Test-Path -LiteralPath $current)) { continue }
+        $json.chrome_user_data_dir = $chrome
+        $json | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $stores
+        Write-WorkerLog "Chrome folder set to $chrome"
+    }
+}
+
+function Get-BotLaunch {
     param($Task)
     $botId = [string]$Task.bot
     if (-not $script:Bots.ContainsKey($botId)) {
@@ -121,10 +177,34 @@ function Get-BotCommand {
     if (-not (Test-Path -LiteralPath $localFile) -or (Get-Item -LiteralPath $localFile).Length -lt 1) {
         throw "The Excel file did not download."
     }
-    $command = 'python "' + $scriptPath.Replace('"', "") + '" "' + $localFile.Replace('"', "") + '"'
-    $store = ([string]$Task.store).Trim()
-    if ($store) { $command += ' --store "' + $store.Replace('"', "") + '"' }
-    return $command
+    $python = Get-PythonExe
+    Repair-ChromeFolder -ScriptPath $scriptPath
+    return @{
+        python = $python
+        script = $scriptPath
+        excel  = $localFile
+        store  = ([string]$Task.store).Trim()
+    }
+}
+
+function Start-BotTask {
+    param($Task, $Launch)
+    $runspace = [runspacefactory]::CreateRunspace()
+    $runspace.Open()
+    $ps = [powershell]::Create()
+    $ps.Runspace = $runspace
+    [void]$ps.AddScript($botScript)
+    [void]$ps.AddArgument([string]$Launch.python)
+    [void]$ps.AddArgument([string]$Launch.script)
+    [void]$ps.AddArgument([string]$Launch.excel)
+    [void]$ps.AddArgument([string]$Launch.store)
+    $handle = $ps.BeginInvoke()
+    return @{
+        task     = $Task
+        runspace = $runspace
+        shell    = $ps
+        handle   = $handle
+    }
 }
 
 function Start-WorkerTask {
@@ -245,9 +325,10 @@ while ($true) {
                 $ready = $true
                 if ([string]$response.task.kind -eq "bot") {
                     try {
-                        $response.task.command = Get-BotCommand -Task $response.task
-                        $response.task.kind = "command"
+                        $launch = Get-BotLaunch -Task $response.task
                         Write-WorkerLog "Excel saved. Starting the bot."
+                        $active = Start-BotTask -Task $response.task -Launch $launch
+                        $ready = $false
                     } catch {
                         $ready = $false
                         $reason = $_.Exception.Message
