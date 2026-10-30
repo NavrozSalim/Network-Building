@@ -322,6 +322,9 @@ while ($true) {
                     if ($code -eq 409) {
                         Write-WorkerLog "The master gave task $($active.task.id) to another laptop."
                         $active = $null
+                    } elseif ($code -eq 404) {
+                        Write-WorkerLog "The master removed task $($active.task.id). This laptop is free."
+                        $active = $null
                     } else {
                         throw
                     }

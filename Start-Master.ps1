@@ -680,6 +680,25 @@ function Handle-Request {
         return @{ Status = 200; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $true; task = $first; tasks = $created }) }
     }
 
+    if ($method -eq "POST" -and $path -eq "/api/tasks/delete") {
+        $body = Read-RequestBody $Request
+        $taskId = [string](Get-Field $body "taskId")
+        $task = Get-TaskById $taskId
+        if (-not $task) {
+            return @{ Status = 404; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $false; message = "Task was not found." }) }
+        }
+        $uploadPath = Get-UploadPath $task
+        Remove-TaskById $taskId
+        if (Test-Path -LiteralPath $uploadPath) { Remove-Item -LiteralPath $uploadPath -Force }
+        foreach ($key in @($script:Workers.Keys)) {
+            $worker = $script:Workers[$key]
+            if ([string]$worker.taskId -eq $taskId) { $worker.taskId = "" }
+        }
+        Save-State
+        Write-Log "Deleted task $taskId"
+        return @{ Status = 200; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $true }) }
+    }
+
     if ($method -eq "POST" -and $path -eq "/api/tasks/clear-finished") {
         $kept = New-Object System.Collections.ArrayList
         foreach ($task in @($script:Tasks)) {
@@ -801,6 +820,14 @@ if ($env:NETWORK_SELFTEST -eq "1") {
         if (-not $follow.task.id -or $ids -contains [string]$follow.task.id) { throw "The freed laptop did not take the waiting task." }
         $status = Invoke-RestMethod -Method Get -Uri "$base/api/status" -Headers $headers -TimeoutSec 10
         if ([int]$status.counts.pending -ne 0) { throw "A task was still pending after a laptop became free." }
+        $extra = Send-Json "/api/tasks" @{ title = "Delete me"; kind = "echo"; seconds = 5 }
+        if (-not $extra.task.id) { throw "Delete test did not create a task." }
+        Send-Json "/api/tasks/delete" @{ taskId = $extra.task.id } | Out-Null
+        $status = Invoke-RestMethod -Method Get -Uri "$base/api/status" -Headers $headers -TimeoutSec 10
+        foreach ($row in @($status.tasks)) {
+            if ([string]$row.id -eq [string]$extra.task.id) { throw "Deleted task was still on the list." }
+        }
+        if ($pageText -notmatch "Delete") { throw "The status page has no Delete button." }
         $payload = [System.Text.Encoding]::UTF8.GetBytes("excel-test")
         $req = [System.Net.HttpWebRequest]::Create("$base/api/tasks/upload")
         $req.Method = "POST"

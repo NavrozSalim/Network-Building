@@ -52,6 +52,7 @@
       cursor: pointer;
     }
     button.secondary { background: transparent; color: var(--ink); }
+    button.delete { background: transparent; color: var(--failed); border-color: #e7c1c1; padding: 4px 10px; }
     button:disabled { opacity: 0.6; cursor: wait; }
     section { margin-top: 8px; }
     h2 { font-size: 18px; margin: 18px 0 8px; }
@@ -132,6 +133,7 @@
     </section>
     <section>
       <h2>Tasks</h2>
+      <p class="hint">Delete removes a stuck task so the master does not send it again.</p>
       <div id="tasks"></div>
     </section>
   </main>
@@ -202,9 +204,9 @@
         var rows = "";
         for (var j = 0; j < ordered.length; j++) {
           var task = ordered[j];
-          rows += "<tr><td>" + esc(task.title) + "</td><td>" + pill(task.status) + "</td><td>" + esc(task.assignedTo || "") + "</td><td>" + esc(task.message || "") + "</td></tr>";
+          rows += "<tr><td>" + esc(task.title) + "</td><td>" + pill(task.status) + "</td><td>" + esc(task.assignedTo || "") + "</td><td>" + esc(task.message || "") + "</td><td><button type=\"button\" class=\"delete\" data-delete=\"" + esc(task.id) + "\">Delete</button></td></tr>";
         }
-        document.getElementById("tasks").innerHTML = "<table><thead><tr><th>Task</th><th>Status</th><th>Laptop</th><th>Note</th></tr></thead><tbody>" + rows + "</tbody></table>";
+        document.getElementById("tasks").innerHTML = "<table><thead><tr><th>Task</th><th>Status</th><th>Laptop</th><th>Note</th><th></th></tr></thead><tbody>" + rows + "</tbody></table>";
       }
       document.getElementById("error").textContent = "";
     }
@@ -243,6 +245,21 @@
     };
     document.getElementById("clear").onclick = function () {
       post("/api/tasks/clear-finished", {});
+    };
+    document.getElementById("tasks").onclick = function (event) {
+      var button = event.target;
+      if (!button || !button.getAttribute || !button.getAttribute("data-delete")) return;
+      button.disabled = true;
+      fetch("/api/tasks/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Network-Token": TOKEN },
+        body: JSON.stringify({ taskId: button.getAttribute("data-delete") })
+      }).then(function (response) {
+        if (!response.ok) throw new Error("Could not delete that task.");
+        return load();
+      }).catch(function () {
+        document.getElementById("error").textContent = "Could not delete that task.";
+      });
     };
     document.getElementById("job").onsubmit = function (event) {
       event.preventDefault();
