@@ -40,6 +40,15 @@ function Get-LanIpv4 {
     return ""
 }
 
+Add-Type -Namespace ListingNetwork -Name Power -MemberDefinition @"
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern uint SetThreadExecutionState(uint esFlags);
+"@
+[void][ListingNetwork.Power]::SetThreadExecutionState([uint32]"0x80000001")
+[System.Net.ServicePointManager]::DefaultConnectionLimit = 16
+[System.Net.ServicePointManager]::Expect100Continue = $false
+$script:MasterDown = $false
+
 function Invoke-Master {
     param(
         [string]$Method,
@@ -47,16 +56,35 @@ function Invoke-Master {
         [hashtable]$Body
     )
     $params = @{
-        Method      = $Method
-        Uri         = "http://$($script:MasterIp):$($script:Port)$Path"
-        Headers     = @{ "X-Network-Token" = $script:Token }
-        TimeoutSec  = 15
+        Method           = $Method
+        Uri              = "http://$($script:MasterIp):$($script:Port)$Path"
+        Headers          = @{ "X-Network-Token" = $script:Token }
+        TimeoutSec       = 20
+        DisableKeepAlive = $true
+        UseBasicParsing  = $true
     }
     if ($Body) {
         $params["ContentType"] = "application/json; charset=utf-8"
         $params["Body"] = ($Body | ConvertTo-Json -Compress)
     }
-    return Invoke-RestMethod @params
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        try {
+            $result = Invoke-RestMethod @params
+            if ($script:MasterDown) {
+                $script:MasterDown = $false
+                Write-WorkerLog "Connected to the master again."
+            }
+            return $result
+        } catch {
+            $lastError = $_
+            $code = 0
+            if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+            if ($code -ge 400 -and $code -lt 500) { throw }
+            if ($attempt -lt 4) { Start-Sleep -Seconds (2 * $attempt) }
+        }
+    }
+    throw $lastError
 }
 
 function Write-WorkerLog {
@@ -345,7 +373,10 @@ while ($true) {
             }
         }
     } catch {
-        Write-WorkerLog "Master is not reachable at http://$($script:MasterIp):$($script:Port). Trying again..."
+        if (-not $script:MasterDown) {
+            $script:MasterDown = $true
+            Write-WorkerLog "Lost the master at http://$($script:MasterIp):$($script:Port). Check that the master window is open. Retrying every few seconds..."
+        }
     }
     Start-Sleep -Seconds $script:HeartbeatSeconds
 }

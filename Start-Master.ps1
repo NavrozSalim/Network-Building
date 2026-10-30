@@ -15,7 +15,7 @@ $script:Port = [int]$config["port"]
 $script:Token = [string]$config["token"]
 $script:MasterIp = [string]$config["masterIp"]
 $script:OfflineSeconds = [int]$config["offlineSeconds"]
-if ($script:OfflineSeconds -lt 10) { $script:OfflineSeconds = 10 }
+if ($script:OfflineSeconds -lt 90) { $script:OfflineSeconds = 90 }
 $script:KnownWorkers = @()
 foreach ($name in $config["workers"]) { $script:KnownWorkers += [string]$name }
 $script:Bots = @{}
@@ -864,6 +864,12 @@ if ($env:NETWORK_SELFTEST -eq "1") {
     Write-Output "TEST_OK"
     exit 0
 }
+
+Add-Type -Namespace ListingNetwork -Name Power -MemberDefinition @"
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern uint SetThreadExecutionState(uint esFlags);
+"@
+[void][ListingNetwork.Power]::SetThreadExecutionState([uint32]"0x80000001")
 
 Restore-State
 $listener = Start-Listener
