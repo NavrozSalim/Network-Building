@@ -547,16 +547,23 @@ function Handle-Request {
         if ($state -ne "busy") { $state = "free" }
         $taskId = [string](Get-Field $body "taskId")
         if ($state -eq "free") { $taskId = "" }
-        Touch-Worker -Name $name -Ip ([string](Get-Field $body "ip")) -State $state -TaskId $taskId | Out-Null
+        $worker = Touch-Worker -Name $name -Ip ([string](Get-Field $body "ip")) -State $state -TaskId $taskId
+        $stop = $false
         if ($state -eq "busy" -and $taskId) {
             $task = Get-TaskById $taskId
-            if ($task -and [string]$task.assignedTo -eq $name -and [string]$task.status -eq "assigned") {
+            if (-not $task) {
+                $stop = $true
+                if ($worker) {
+                    $worker.state = "free"
+                    $worker.taskId = ""
+                }
+            } elseif ([string]$task.assignedTo -eq $name -and [string]$task.status -eq "assigned") {
                 $task.status = "running"
                 $task.message = "$name is working on this."
             }
         }
         Save-State
-        return @{ Status = 200; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $true }) }
+        return @{ Status = 200; Type = "application/json; charset=utf-8"; Body = (ConvertTo-ApiJson @{ ok = $true; stop = $stop }) }
     }
 
     if ($method -eq "POST" -and $path -eq "/api/next-job") {
@@ -828,6 +835,11 @@ if ($env:NETWORK_SELFTEST -eq "1") {
             if ([string]$row.id -eq [string]$extra.task.id) { throw "Deleted task was still on the list." }
         }
         if ($pageText -notmatch "Delete") { throw "The status page has no Delete button." }
+        $liveBeat = Send-Json "/api/heartbeat" @{ name = "listing-worker-2"; ip = "192.168.1.40"; state = "busy"; taskId = $ids[1] }
+        if ($liveBeat.stop) { throw "A live task told the laptop to stop." }
+        Send-Json "/api/tasks/delete" @{ taskId = $ids[1] } | Out-Null
+        $stopBeat = Send-Json "/api/heartbeat" @{ name = "listing-worker-2"; ip = "192.168.1.40"; state = "busy"; taskId = $ids[1] }
+        if (-not $stopBeat.stop) { throw "A deleted task did not tell the laptop to stop." }
         $payload = [System.Text.Encoding]::UTF8.GetBytes("excel-test")
         $req = [System.Net.HttpWebRequest]::Create("$base/api/tasks/upload")
         $req.Method = "POST"

@@ -254,6 +254,31 @@ function Start-WorkerTask {
     }
 }
 
+function Stop-ActiveBot {
+    param($Active)
+    $taskId = [string]$Active.task.id
+    $procs = @()
+    try { $procs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) } catch { }
+    foreach ($proc in $procs) {
+        $name = [string]$proc.Name
+        $line = [string]$proc.CommandLine
+        if (($name -eq "python.exe" -or $name -eq "pythonw.exe") -and $line.Contains($taskId)) {
+            & taskkill.exe /F /T /PID $proc.ProcessId 2>$null | Out-Null
+        }
+    }
+    foreach ($proc in $procs) {
+        $line = [string]$proc.CommandLine
+        if ([string]$proc.Name -eq "chrome.exe" -and $line -match "remote-debugging-port=") {
+            & taskkill.exe /F /T /PID $proc.ProcessId 2>$null | Out-Null
+        }
+    }
+    Get-Process -Name chromedriver -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    try { $Active.shell.Stop() } catch { }
+    try { $Active.shell.Dispose() } catch { }
+    try { $Active.runspace.Close() } catch { }
+    try { $Active.runspace.Dispose() } catch { }
+}
+
 function Complete-WorkerTask {
     param($Active)
     $ok = $false
@@ -296,12 +321,19 @@ $active = $null
 while ($true) {
     try {
         if ($active) {
-            Invoke-Master -Method Post -Path "/api/heartbeat" -Body @{
+            $beat = Invoke-Master -Method Post -Path "/api/heartbeat" -Body @{
                 name   = $script:WorkerName
                 ip     = $ip
                 state  = "busy"
                 taskId = [string]$active.task.id
-            } | Out-Null
+            }
+            if ($beat.stop) {
+                $stoppedId = [string]$active.task.id
+                Stop-ActiveBot -Active $active
+                Write-WorkerLog "The master deleted task $stoppedId. The bot was stopped."
+                $active = $null
+                continue
+            }
 
             if ($active.handle.IsCompleted -and -not $active.result) {
                 $active.result = Complete-WorkerTask -Active $active
